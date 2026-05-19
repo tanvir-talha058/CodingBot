@@ -2,28 +2,40 @@
 
 from __future__ import annotations
 
-from telegram import Update
-from telegram.constants import ParseMode
+import logging
+
+from telegram import Message, Update
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import ContextTypes
 
 from ai import copilot
 from utils.formatting import split_long_message
 from utils.history import history
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-async def _send(update: Update, text: str) -> None:
+async def _send(update: Update, text: str, parse_mode: str | None = None) -> None:
     """Send a (possibly long) message, splitting if needed."""
     chunks = split_long_message(text)
     for chunk in chunks:
-        await update.message.reply_text(chunk)  # type: ignore[union-attr]
+        await update.message.reply_text(chunk, parse_mode=parse_mode)  # type: ignore[union-attr]
 
 
-async def _thinking(update: Update) -> None:
-    """Send a 'thinking…' placeholder while waiting for the AI."""
-    await update.message.reply_text("⏳ Thinking…")  # type: ignore[union-attr]
+async def _thinking(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Message:
+    """Send a typing action and a 'thinking…' placeholder.
+
+    Returns the placeholder message so the caller can delete it on success
+    or edit it into an error message on failure.
+    """
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id,  # type: ignore[union-attr]
+        action=ChatAction.TYPING,
+    )
+    return await update.message.reply_text("⏳ Thinking…")  # type: ignore[union-attr]
 
 
 # ---------------------------------------------------------------------------
@@ -36,15 +48,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # 
     name = user.first_name if user else "there"
     await _send(
         update,
-        f"👋 Hi {name}! I'm *CodingBot* — your AI coding assistant powered by GitHub Copilot.\n\n"
+        f"👋 Hi <b>{name}</b>! I'm <b>CodingBot</b> — your AI coding assistant.\n\n"
         "I can help you:\n"
-        "• 🧑‍💻 Generate code from a description\n"
-        "• 📖 Explain code you paste\n"
-        "• 🐛 Debug errors in your code\n"
-        "• 🔍 Review code for quality & security\n"
-        "• ♻️ Refactor code for clarity/performance\n"
-        "• 💬 Chat freely about any coding topic\n\n"
+        "• 🧑‍💻 <b>/code</b> — Generate code from a description\n"
+        "• 📖 <b>/explain</b> — Explain code you paste\n"
+        "• 🐛 <b>/debug</b> — Find & fix bugs in your code\n"
+        "• 🔍 <b>/review</b> — Review code for quality &amp; security\n"
+        "• ♻️ <b>/refactor</b> — Refactor code for clarity/performance\n"
+        "• 💬 Chat freely — just send any message!\n\n"
         "Type /help to see all commands, or just ask me anything!",
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -72,7 +85,7 @@ Example: `/code a Python function to sort a list of dicts by key`
 *Free-form chat*
 Just send any message and I'll answer as your coding assistant!
 
-_Tip: paste code directly in your message and I'll detect and respond to it._
+_Tip: paste code directly in your message and I'll detect and respond to it\\._
 """
 
 
@@ -95,7 +108,12 @@ async def code_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """
     args = context.args or []
     if not args:
-        await _send(update, "Usage: /code <description>\nExample: /code a Python binary search function")
+        await _send(
+            update,
+            "ℹ️ <b>Usage:</b> /code &lt;description&gt;\n"
+            "<b>Example:</b> <code>/code a Python binary search function</code>",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     full_text = " ".join(args)
@@ -107,8 +125,14 @@ async def code_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         full_text = parts[0].strip()
         language = parts[1].strip()
 
-    await _thinking(update)
-    reply = await copilot.generate_code(full_text, language)
+    thinking_msg = await _thinking(update, context)
+    try:
+        reply = await copilot.generate_code(full_text, language)
+    except Exception:
+        logger.exception("generate_code failed")
+        await thinking_msg.edit_text("❌ Sorry, something went wrong. Please try again.")
+        return
+    await thinking_msg.delete()
     await _send(update, reply)
 
 
@@ -116,14 +140,24 @@ async def code_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # /explain
 # ---------------------------------------------------------------------------
 
-async def explain_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG001
+async def explain_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Explain the code in the replied-to message."""
     code = _extract_replied_code(update)
     if code is None:
-        await _send(update, "Please *reply* to a message containing code, then use /explain.")
+        await _send(
+            update,
+            "ℹ️ Please <b>reply</b> to a message containing code, then use /explain.",
+            parse_mode=ParseMode.HTML,
+        )
         return
-    await _thinking(update)
-    reply = await copilot.explain_code(code)
+    thinking_msg = await _thinking(update, context)
+    try:
+        reply = await copilot.explain_code(code)
+    except Exception:
+        logger.exception("explain_code failed")
+        await thinking_msg.edit_text("❌ Sorry, something went wrong. Please try again.")
+        return
+    await thinking_msg.delete()
     await _send(update, reply)
 
 
@@ -138,11 +172,21 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """
     code = _extract_replied_code(update)
     if code is None:
-        await _send(update, "Please *reply* to a message containing code, then use /debug [error message].")
+        await _send(
+            update,
+            "ℹ️ Please <b>reply</b> to a message containing code, then use /debug [error message].",
+            parse_mode=ParseMode.HTML,
+        )
         return
     error = " ".join(context.args) if context.args else ""
-    await _thinking(update)
-    reply = await copilot.debug_code(code, error)
+    thinking_msg = await _thinking(update, context)
+    try:
+        reply = await copilot.debug_code(code, error)
+    except Exception:
+        logger.exception("debug_code failed")
+        await thinking_msg.edit_text("❌ Sorry, something went wrong. Please try again.")
+        return
+    await thinking_msg.delete()
     await _send(update, reply)
 
 
@@ -150,14 +194,24 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # /review
 # ---------------------------------------------------------------------------
 
-async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG001
+async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Review the code in the replied-to message."""
     code = _extract_replied_code(update)
     if code is None:
-        await _send(update, "Please *reply* to a message containing code, then use /review.")
+        await _send(
+            update,
+            "ℹ️ Please <b>reply</b> to a message containing code, then use /review.",
+            parse_mode=ParseMode.HTML,
+        )
         return
-    await _thinking(update)
-    reply = await copilot.review_code(code)
+    thinking_msg = await _thinking(update, context)
+    try:
+        reply = await copilot.review_code(code)
+    except Exception:
+        logger.exception("review_code failed")
+        await thinking_msg.edit_text("❌ Sorry, something went wrong. Please try again.")
+        return
+    await thinking_msg.delete()
     await _send(update, reply)
 
 
@@ -172,11 +226,21 @@ async def refactor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """
     code = _extract_replied_code(update)
     if code is None:
-        await _send(update, "Please *reply* to a message containing code, then use /refactor [goal].")
+        await _send(
+            update,
+            "ℹ️ Please <b>reply</b> to a message containing code, then use /refactor [goal].",
+            parse_mode=ParseMode.HTML,
+        )
         return
     goal = " ".join(context.args) if context.args else ""
-    await _thinking(update)
-    reply = await copilot.refactor_code(code, goal)
+    thinking_msg = await _thinking(update, context)
+    try:
+        reply = await copilot.refactor_code(code, goal)
+    except Exception:
+        logger.exception("refactor_code failed")
+        await thinking_msg.edit_text("❌ Sorry, something went wrong. Please try again.")
+        return
+    await thinking_msg.delete()
     await _send(update, reply)
 
 

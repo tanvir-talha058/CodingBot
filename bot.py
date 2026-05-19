@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 
+from telegram import BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -34,12 +35,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Commands shown in the Telegram "/" menu
+_BOT_COMMANDS = [
+    BotCommand("start",    "Welcome message & overview"),
+    BotCommand("help",     "Show all commands"),
+    BotCommand("code",     "Generate code from a description"),
+    BotCommand("explain",  "Explain replied-to code"),
+    BotCommand("debug",    "Find & fix bugs in replied-to code"),
+    BotCommand("review",   "Review replied-to code for quality"),
+    BotCommand("refactor", "Refactor replied-to code"),
+    BotCommand("clear",    "Clear your conversation history"),
+]
+
+
+async def _post_init(application: Application) -> None:  # type: ignore[type-arg]
+    """Register bot commands with Telegram so they appear in the '/' menu."""
+    await application.bot.set_my_commands(_BOT_COMMANDS)
+    logger.info("Bot commands registered with Telegram")
+
 
 def main() -> None:
     """Build the Telegram Application and start polling."""
     logger.info("Starting CodingBot with model=%s", config.OPENAI_MODEL)
 
-    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(config.TELEGRAM_BOT_TOKEN)
+        .post_init(_post_init)
+        .build()
+    )
 
     # ── Command handlers ──────────────────────────────────────────────────
     app.add_handler(CommandHandler("start", start))

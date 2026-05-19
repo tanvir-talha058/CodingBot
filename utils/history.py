@@ -31,6 +31,11 @@ class ConversationHistory:
         """Return the full conversation history for a user."""
         return list(self._history[user_id])
 
+    def remove_last(self, user_id: int) -> None:
+        """Remove the most recently added message for a user."""
+        if self._history[user_id]:
+            self._history[user_id].pop()
+
     def clear(self, user_id: int) -> None:
         """Clear conversation history for a user."""
         self._history[user_id].clear()
